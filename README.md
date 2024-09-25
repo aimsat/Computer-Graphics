@@ -1,2 +1,2 @@
 # Computer-Graphics
-Project
+Simple Project using Webgl
