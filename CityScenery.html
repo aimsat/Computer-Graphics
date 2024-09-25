@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Scenery Simulation</title>
+    <script type="text/javascript">
+        var carPositionX = -1.0; // Initial car X position
+        var carSpeed = 0.05; // Speed at which car moves
+        var windmillRotation = 0.0; // Windmill blade rotation
+        var lastRenderTime = 0; // Last time the windmill was rendered
+
+        function initWebGL(canvas) {
+            var gl;
+            try {
+                gl = canvas.getContext("experimental-webgl");
+            } catch (e) {
+                alert("Error creating WebGL Context!: " + e.toString());
+                throw Error("Error creating WebGL Context");
+            }
+            return gl;        
+        }
+
+        function initViewport(gl, canvas) {
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        var projectionMatrix, modelViewMatrix;
+
+        function initMatrices() {
+            modelViewMatrix = new Float32Array([
+                1, 0, 0, 0,
+                0, 1, 0, 0, 
+                0, 0, 1, 0, 
+                0, 0, -3.5, 1
+            ]);
+
+            projectionMatrix = new Float32Array([
+                2.41421, 0, 0, 0,
+                0, 2.41421, 0, 0,
+                0, 0, -1.002002, -1, 
+                0, 0, -0.2002002, 0
+            ]);
+        }
+
+        function createCircle(gl, radius, segments) {
+            var vertexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+            var verts = [];
+            for (var i = 0; i <= segments; i++) {
+                var theta = (i / segments) * 2 * Math.PI;
+                verts.push(radius * Math.cos(theta));
+                verts.push(radius * Math.sin(theta));
+                verts.push(0.0);
+            }
+
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+            return { buffer: vertexBuffer, vertSize: 3, nVerts: verts.length / 3, primtype: gl.TRIANGLE_FAN };
+        }
+
+        function createRectangle(gl, width, height) {
+            var vertexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+            var verts = [
+                width / 2, height / 2, 0.0,
+                -width / 2, height / 2, 0.0,
+                width / 2, -height / 2, 0.0,
+                -width / 2, -height / 2, 0.0
+            ];
+
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+            return { buffer: vertexBuffer, vertSize: 3, nVerts: 4, primtype: gl.TRIANGLE_STRIP };
+        }
+
+        function createTriangle(gl, width, height) {
+            var vertexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+            var verts = [
+                0.0, height / 2, 0.0, // Apex
+                -width / 2, -height / 2, 0.0, // Bottom left
+                width / 2, -height / 2, 0.0 // Bottom right
+            ];
+
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+            return { buffer: vertexBuffer, vertSize: 3, nVerts: 3, primtype: gl.TRIANGLES };
+        }
+
+        function createCumulusCloud(gl, xOffset, yOffset) {
+            var vertexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+            var verts = [];
+            var cloudParts = [
+                { x: xOffset, y: yOffset + 0.1, radius: 0.1 },
+                { x: xOffset - 0.1, y: yOffset, radius: 0.15 },
+                { x: xOffset + 0.1, y: yOffset, radius: 0.15 },
+                { x: xOffset, y: yOffset - 0.1, radius: 0.1 }
+            ];
+
+            cloudParts.forEach(part => {
+                var radius = part.radius;
+                var segments = 20;
+                for (var i = 0; i <= segments; i++) {
+                    var theta = (i / segments) * 2 * Math.PI;
+                    verts.push(part.x + radius * Math.cos(theta));
+                    verts.push(part.y + radius * Math.sin(theta));
+                    verts.push(0.0);
+                }
+            });
+
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+            return { buffer: vertexBuffer, vertSize: 3, nVerts: verts.length / 3, primtype: gl.TRIANGLE_FAN };
+        }
+
+        function createShader(gl, str, type) {
+            var shader;
+            if (type == "fragment") {
+                shader = gl.createShader(gl.FRAGMENT_SHADER);
+            } else if (type == "vertex") {
+                shader = gl.createShader(gl.VERTEX_SHADER);
+            } else {
+                return null;
+            }
+            gl.shaderSource(shader, str);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                alert(gl.getShaderInfoLog(shader));
+                return null;
+            }
+            return shader;
+        }
+
+        var vertexShaderSource = `
+            attribute vec3 vertexPos;
+            uniform mat4 modelViewMatrix;
+            uniform mat4 projectionMatrix;
+            void main(void) {
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(vertexPos, 1.0);
+            }
+        `;
+
+        var fragmentShaderSource = `
+            precision mediump float;
+            uniform vec4 color;
+            void main(void) {
+                gl_FragColor = color;
+            }
+        `;
+
+        var shaderProgram, shaderVertexPositionAttribute, shaderProjectionMatrixUniform, shaderModelViewMatrixUniform, shaderColorUniform;
+
+        function initShader(gl) {
+            var fragmentShader = createShader(gl, fragmentShaderSource, "fragment");
+            var vertexShader = createShader(gl, vertexShaderSource, "vertex");
+            shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+            shaderVertexPositionAttribute = gl.getAttribLocation(shaderProgram, "vertexPos");
+            gl.enableVertexAttribArray(shaderVertexPositionAttribute);
+            shaderProjectionMatrixUniform = gl.getUniformLocation(shaderProgram, "projectionMatrix");
+            shaderModelViewMatrixUniform = gl.getUniformLocation(shaderProgram, "modelViewMatrix");
+            shaderColorUniform = gl.getUniformLocation(shaderProgram, "color");
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                alert("Could not initialise shaders");
+            }
+        }
+
+        function draw(gl, obj, color) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, obj.buffer);
+            gl.useProgram(shaderProgram);
+            gl.vertexAttribPointer(shaderVertexPositionAttribute, obj.vertSize, gl.FLOAT, false, 0, 0);
+            gl.uniformMatrix4fv(shaderProjectionMatrixUniform, false, projectionMatrix);
+            gl.uniformMatrix4fv(shaderModelViewMatrixUniform, false, modelViewMatrix);
+            gl.uniform4fv(shaderColorUniform, color);
+            gl.drawArrays(obj.primtype, 0, obj.nVerts);
+        }
+
+        // Windmill Drawing Function
+        function drawWindmill(gl, xOffset, yOffset) {
+            // Draw Tower
+            modelViewMatrix[12] = xOffset;
+            modelViewMatrix[13] = yOffset;
+            draw(gl, createRectangle(gl, 0.1, 0.6), [0.2, 0.25, 0.2, 1.0]); // Brown tower
+
+            // Draw Body
+            modelViewMatrix[12] = xOffset;
+            modelViewMatrix[13] = yOffset + 0.3;
+            draw(gl, createCircle(gl, 0.1, 20), [0.6, 0.6, 0.6, 1.0]); // Gray body
+
+            // Draw Blades
+            for (var i = 0; i < 4; i++) {
+                modelViewMatrix[12] = xOffset;
+                modelViewMatrix[13] = yOffset + 0.3;
+                var angle = windmillRotation + (i * Math.PI / 2);
+                modelViewMatrix[0] = Math.cos(angle);
+                modelViewMatrix[1] = Math.sin(angle);
+                modelViewMatrix[4] = -Math.sin(angle);
+                modelViewMatrix[5] = Math.cos(angle);
+                draw(gl, createTriangle(gl, 0.05, 0.3), [1.0, 1.0, 1.0, 1.0]); // White blades
+            }
+        }
+
+        
+
+        function drawCar(gl) {
+            modelViewMatrix[12] = carPositionX; // Update car position
+            modelViewMatrix[13] = -1.1; 
+            draw(gl, createRectangle(gl, 0.5, 0.2), [0.0, 0.0, 1.0, 1.0]); // Blue car body
+
+            // Car roof
+            modelViewMatrix[12] = carPositionX; // Keep car body position
+            modelViewMatrix[13] = -1.0; // Move roof up slightly
+            draw(gl, createRectangle(gl, 0.3, 0.1), [0.0, 0.0, 0.5, 1.0]); // Dark blue car roof
+
+            // Car wheels
+            modelViewMatrix[12] = carPositionX - 0.05; // Position left wheel further left
+            modelViewMatrix[13] = -1.2; // Move down slightly for wheels
+            draw(gl, createCircle(gl, 0.05, 10), [0.0, 0.0, 0.0, 1.0]); // Black left wheel
+
+            modelViewMatrix[12] = carPositionX + 0.05; // Position right wheel further right
+            draw(gl, createCircle(gl, 0.05, 10), [0.0, 0.0, 0.0, 1.0]); // Black right wheel
+        }
+
+        function drawHouse(gl, xOffset, yOffset) {
+            // Draw house base
+            modelViewMatrix[12] = xOffset; 
+            modelViewMatrix[13] = yOffset; 
+            draw(gl, createRectangle(gl, 0.4, 0.3), [1.0, 0.5, 0.0, 1.0]); // Orange house base
+
+            // Draw house roof
+            modelViewMatrix[12] = xOffset; 
+            modelViewMatrix[13] = yOffset + 0.25; 
+            draw(gl, createTriangle(gl, 0.4, 0.2), [0.8, 0.0, 0.0, 1.0]); // Red roof
+
+            // Draw door
+            modelViewMatrix[12] = xOffset; 
+            modelViewMatrix[13] = yOffset - 0.08; 
+            draw(gl, createRectangle(gl, 0.1, 0.15), [0.5, 0.25, 0.0, 1.0]); // Brown door
+        }
+
+        function onLoad() {
+            var canvas = document.getElementById("webglcanvas");
+            var gl = initWebGL(canvas);
+            initViewport(gl, canvas);
+            initMatrices();
+            initShader(gl);
+
+            // Set sky blue background
+            gl.clearColor(0.529, 0.807, 0.922, 1.0); 
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            // Draw Sun
+            modelViewMatrix[12] = 0; 
+            modelViewMatrix[13] = 1; 
+            draw(gl, createCircle(gl, 0.2, 21), [1.0, 1.0, 0.0, 1.0]); 
+
+            // Draw Cumulus Clouds
+            draw(gl, createCumulusCloud(gl, -0.8, 0.009), [1.0, 1.0, 1.0, 1.0]); 
+            draw(gl, createCumulusCloud(gl, 0.8, 0.009), [1.0, 1.0, 1.0, 1.0]); 
+
+            // Draw Road
+            modelViewMatrix[12] = 0; 
+            modelViewMatrix[13] = -1; 
+            draw(gl, createRectangle(gl, 3, 0.5), [0.5, 0.5, 0.5, 1.0]); 
+
+             
+
+            // Draw Road Dividers
+            drawRoadDividers(gl);
+
+            // Draw Trees
+            drawTree(gl, 1.0, -0.5); 
+
+            // Draw Grass Below the Road and Car
+            modelViewMatrix[12] = 0; 
+            modelViewMatrix[13] = -1.7; 
+            draw(gl, createRectangle(gl, 3, 1.0), [0.0, 0.5, 0.0, 1.0]); 
+
+            // Draw Car
+            drawCar(gl);
+
+            // Draw Houses
+            drawHouse(gl, -0.02, -0.6);
+            drawHouse(gl, -0.6, -0.6); 
+            drawHouse(gl, 0.6, -0.6);
+
+            // Draw Windmill near the houses
+            drawWindmill(gl, -1.1, -0.45);
+        }
+
+        function drawRoadDividers(gl) {
+            var dividerWidth = 0.2; 
+            var dividerHeight = 0.05; 
+
+            // First divider
+            modelViewMatrix[12] = 0; 
+            modelViewMatrix[13] = -0.99; 
+            draw(gl, createRectangle(gl, dividerWidth, dividerHeight), [1.0, 1.0, 1.0, 1.0]); 
+
+            // Second divider
+            modelViewMatrix[12] = 0.5; 
+            modelViewMatrix[13] = -0.99; 
+            draw(gl, createRectangle(gl, dividerWidth, dividerHeight), [1.0, 1.0, 1.0, 1.0]); 
+
+            // Third divider
+            modelViewMatrix[12] = -0.5; 
+            modelViewMatrix[13] = -0.99; 
+            draw(gl, createRectangle(gl, dividerWidth, dividerHeight), [1.0, 1.0, 1.0, 1.0]); 
+        }
+
+        function drawTree(gl, xOffset, yOffset) {
+            // Draw Tree Trunk
+            modelViewMatrix[12] = xOffset; 
+            modelViewMatrix[13] = yOffset; 
+            draw(gl, createRectangle(gl, 0.15, 0.5), [0.545, 0.271, 0.075, 1.0]); 
+
+            // Draw Tree Foliage
+            modelViewMatrix[12] = xOffset; 
+            modelViewMatrix[13] = yOffset + 0.5; 
+            draw(gl, createCircle(gl, 0.4, 20), [0.0, 0.5, 0.0, 1.0]); 
+        }
+
+        function updateCarPosition(e) {
+            if (e.keyCode === 37) {
+                // Left arrow key
+                carPositionX -= carSpeed;
+            } else if (e.keyCode === 39) {
+                // Right arrow key
+                carPositionX += carSpeed;
+            }
+            renderScene(); // Redraw the scene with updated car position
+        }
+
+        // Rotate the windmill continuously
+        function animateWindmill(timestamp) {
+            var deltaTime = timestamp - lastRenderTime;
+            lastRenderTime = timestamp;
+
+            windmillRotation += (deltaTime / 100) * 2 * Math.PI * 0.1; // Rotate blades at 0.1 rotations per second
+            renderScene(); // Redraw the entire scene with the updated windmill rotation
+
+            requestAnimationFrame(animateWindmill); // Continue the animation loop
+        }
+
+        function renderScene() {
+            var canvas = document.getElementById("webglcanvas");
+            var gl = initWebGL(canvas);
+            initViewport(gl, canvas);
+            gl.clear(gl.COLOR_BUFFER_BIT); // Clear previous frame
+
+            onLoad(); // Redraw the entire scene
+        }
+
+        window.addEventListener('keydown', updateCarPosition); // Add event listener for key presses
+
+window.onload = function() {
+    requestAnimationFrame(animateWindmill); // Start the windmill animation
+};
+</script>
+</head>
+
+<body>
+<canvas id="webglcanvas" style="border: none;" width="500" height="500"></canvas>
+</body>
+</html>
+
